@@ -1,5 +1,5 @@
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   LayoutDashboard,
   ClipboardCheck,
@@ -15,17 +15,23 @@ import {
   ArrowRight,
   Menu,
   X,
+  LogOut,
 } from "lucide-react";
 
 import Estudantes from "./pages/Estudantes";
 import Frequencia from "./pages/Frequencia";
 import Cozinha from "./pages/Cozinha";
-
-import { useEstudantes } from "./context/EstudantesContext";
-import { useFrequencia } from "./context/FrequenciaContext";
 import Configuracoes from "./pages/Configuracoes";
 import Estoque from "./pages/Estoque";
 import Cardapio from "./pages/Cardapio";
+import Relatorios from "./pages/Relatorios";
+import Login from "./pages/Login";
+import RedefinirSenha from "./pages/RedefinirSenha";
+
+import { useEstudantes } from "./context/EstudantesContext";
+import { useFrequencia } from "./context/FrequenciaContext";
+import { useEstoque } from "./context/EstoqueContext";
+import { supabase } from "./lib/supabase";
 
 const menus = [
   { nome: "Painel Geral", icone: LayoutDashboard },
@@ -46,12 +52,14 @@ function dataLocal(data: Date): string {
   return `${ano}-${mes}-${dia}`;
 }
 
+// PAINEL PRINCIPAL DO CAPE
 function App() {
   const [pagina, setPagina] = useState("Painel Geral");
   const [menuAberto, setMenuAberto] = useState(false);
 
   const { estudantes } = useEstudantes();
   const { registros } = useFrequencia();
+  const { produtos, lotes } = useEstoque();
 
   const hoje = dataLocal(new Date());
 
@@ -68,10 +76,21 @@ function App() {
     (estudante) =>
       estudante.restricao === "sim" &&
       presentesHoje.some(
-        (registro) =>
-          registro.estudanteId === estudante.id
+        (registro) => registro.estudanteId === estudante.id
       )
   ).length;
+
+  const produtosEstoqueBaixo = produtos.filter(
+    (produto) =>
+      produto.quantidade <= produto.estoqueMinimo
+  );
+
+  const lotesVencidos = lotes.filter(
+    (lote) =>
+      lote.quantidade > 0 &&
+      lote.validade !== "" &&
+      lote.validade < hoje
+  );
 
   const indicadores = [
     {
@@ -86,12 +105,12 @@ function App() {
     },
     {
       titulo: "Produtos cadastrados",
-      valor: "—",
+      valor: produtos.length,
       icone: Package,
     },
     {
       titulo: "Estoque baixo",
-      valor: "—",
+      valor: produtosEstoqueBaixo.length,
       icone: Bell,
     },
   ];
@@ -174,8 +193,28 @@ function App() {
             </div>
           </div>
 
-          <div className="rounded-full bg-teal-100 text-teal-800 px-4 py-2 text-sm">
-            Ambiente de demonstração
+          <div className="flex items-center gap-3">
+            <span className="hidden sm:inline-flex rounded-full bg-emerald-100 px-4 py-2 text-sm font-medium text-emerald-800">
+              Administrador
+            </span>
+
+            <button
+              type="button"
+              onClick={async () => {
+                const { error } =
+                  await supabase.auth.signOut();
+
+                if (error) {
+                  alert(
+                    "Não foi possível sair. Tente novamente."
+                  );
+                }
+              }}
+              className="flex items-center gap-2 rounded-xl border border-slate-200 px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-100"
+            >
+              <LogOut size={17} />
+              Sair
+            </button>
           </div>
         </header>
 
@@ -262,11 +301,20 @@ function App() {
                     Situação do estoque
                   </h4>
 
-                  <p className="text-sm text-slate-500">
-                    Os indicadores de produtos, estoque
-                    mínimo e validade serão integrados
-                    quando desenvolvermos o módulo Estoque.
-                  </p>
+                  <div className="space-y-2 text-sm text-slate-600">
+                    <p>
+                      {produtosEstoqueBaixo.length === 0
+                        ? "Nenhum produto no limite ou abaixo do estoque mínimo."
+                        : `${produtosEstoqueBaixo.length} produto(s) no limite ou abaixo do estoque mínimo.`}
+                    </p>
+
+                    {lotesVencidos.length > 0 && (
+                      <p className="text-amber-700 font-medium">
+                        Atenção: {lotesVencidos.length} lote(s)
+                        vencido(s) com saldo em estoque.
+                      </p>
+                    )}
+                  </div>
 
                   <button
                     type="button"
@@ -284,13 +332,15 @@ function App() {
           ) : pagina === "Controle de Frequência" ? (
             <Frequencia />
           ) : pagina === "Cozinha" ? (
-          <Cozinha />
+            <Cozinha />
           ) : pagina === "Configurações" ? (
-          <Configuracoes />
+            <Configuracoes />
           ) : pagina === "Estoque" ? (
-         <Estoque />
+            <Estoque />
           ) : pagina === "Cardápio" ? (
-        <Cardapio />
+            <Cardapio />
+          ) : pagina === "Relatórios" ? (
+            <Relatorios />
           ) : (
             <section className="bg-white rounded-2xl border border-slate-200 p-8">
               <h3 className="text-2xl font-bold mb-3">
@@ -309,4 +359,160 @@ function App() {
   );
 }
 
-export default App;
+// CONTROLE DE ACESSO E RECUPERAÇÃO DE SENHA
+function AppProtegido() {
+  // A tela de recuperação deve aparecer antes do painel.
+  // O parâmetro também é usado no link enviado por e-mail.
+  const emRecuperacao =
+    new URLSearchParams(window.location.search).get(
+      "recuperar-senha"
+    ) === "1";
+
+  const [verificando, setVerificando] = useState(true);
+  const [autorizado, setAutorizado] = useState(false);
+  const [mensagem, setMensagem] = useState("");
+
+  useEffect(() => {
+    // Não executar a verificação administrativa
+    // durante a redefinição de senha.
+    if (emRecuperacao) {
+      return;
+    }
+
+    let ativo = true;
+    let versao = 0;
+
+    async function verificarAcesso() {
+      const atual = ++versao;
+
+      if (ativo) {
+        setVerificando(true);
+      }
+
+      try {
+        const { data, error } =
+          await supabase.auth.getUser();
+
+        if (!ativo || atual !== versao) return;
+
+        if (error || !data.user) {
+          setAutorizado(false);
+          setMensagem("");
+          return;
+        }
+
+        const { data: perfil, error: erroPerfil } =
+          await supabase
+            .from("perfis_acesso")
+            .select("funcao, ativo")
+            .eq("usuario_id", data.user.id)
+            .single();
+
+        if (!ativo || atual !== versao) return;
+
+        if (
+          erroPerfil ||
+          !perfil?.ativo ||
+          perfil.funcao !== "administrador"
+        ) {
+          setAutorizado(false);
+          setMensagem(
+            "Sua conta não possui acesso administrativo autorizado."
+          );
+          return;
+        }
+
+        setAutorizado(true);
+        setMensagem("");
+      } catch {
+        if (ativo && atual === versao) {
+          setAutorizado(false);
+          setMensagem(
+            "Não foi possível verificar seu acesso. Tente novamente."
+          );
+        }
+      } finally {
+        if (ativo && atual === versao) {
+          setVerificando(false);
+        }
+      }
+    }
+
+    const { data: listener } =
+      supabase.auth.onAuthStateChange(() => {
+        // Executa a verificação fora do callback
+        // para evitar conflitos com a autenticação.
+        setTimeout(() => {
+          if (ativo) {
+            void verificarAcesso();
+          }
+        }, 0);
+      });
+
+    void verificarAcesso();
+
+    return () => {
+      ativo = false;
+      versao++;
+      listener.subscription.unsubscribe();
+    };
+  }, [emRecuperacao]);
+
+  // PRIORIDADE: TELA DE REDEFINIÇÃO
+  if (emRecuperacao) {
+    return <RedefinirSenha />;
+  }
+
+  // AGUARDANDO VERIFICAÇÃO
+  if (verificando) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-50">
+        <div className="text-center">
+          <div className="mx-auto mb-5 h-12 w-12 animate-spin rounded-full border-4 border-emerald-100 border-t-emerald-700" />
+
+          <h2 className="text-xl font-bold text-emerald-900">
+            CAPE
+          </h2>
+
+          <p className="mt-2 text-sm text-slate-500">
+            Verificando seu acesso...
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  // USUÁRIO SEM ACESSO ADMINISTRATIVO
+  if (!autorizado) {
+    return (
+      <>
+        {mensagem && (
+          <div
+            role="alert"
+            className="bg-amber-50 px-4 py-3 text-center text-sm text-amber-900"
+          >
+            {mensagem}
+
+            <button
+              type="button"
+              className="ml-3 font-semibold underline"
+              onClick={async () => {
+                await supabase.auth.signOut();
+                setMensagem("");
+              }}
+            >
+              Sair da conta
+            </button>
+          </div>
+        )}
+
+        <Login />
+      </>
+    );
+  }
+
+  // USUÁRIO ADMINISTRADOR AUTORIZADO
+  return <App />;
+}
+
+export default AppProtegido;

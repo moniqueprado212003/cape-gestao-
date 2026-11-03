@@ -14,6 +14,7 @@ import {
   useRefeicoes,
   type TipoRefeicao,
 } from "../context/RefeicoesContext";
+import ControleAcesso from "./ControleAcesso";
 
 const horariosPadrao: Record<TipoRefeicao, string> = {
   lanche_manha: "09:15",
@@ -239,7 +240,9 @@ export default function Configuracoes() {
           a página. A persistência será implementada
           posteriormente.
         </p>
-      </section>
+            </section>
+
+      <ControleAcesso />
     </div>
   );
 }
